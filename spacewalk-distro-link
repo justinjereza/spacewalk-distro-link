@@ -1,0 +1,94 @@
+#!/usr/bin/python
+
+# Version   : 0.0.1
+# Author    : Justin Jereza
+
+import os, subprocess, mimetypes, gzip
+from xml.dom import minidom
+
+distros = {
+        'centos6-x86_64': 'rsync://ftp.jaist.ac.jp/pub/Linux/CentOS/6/os/x86_64/',
+        }
+
+satellite_root = '/var/satellite/redhat/1'
+distrotree_root = '/var/distro-trees'
+
+class repomd(dict):
+    def __init__(self, path):
+        self._repomd_file = self._normalize_repomd_file(path)
+        self._document = minidom.parse(self._repomd_file)
+
+        datalist = self._document.documentElement.getElementsByTagName('data')
+        for i in datalist:
+            datatype = i.getAttribute('type')
+            location = i.getElementsByTagName('location')[-1].getAttribute('href')
+            location = location[9:]
+            self[datatype] = location
+
+    def _normalize_repomd_file(self, path):
+        s = path[-10:]
+
+        if s == 'repomd.xml':
+            return path
+        return path + '/repomd.xml'
+
+def get_package_file(pkg):
+    name = pkg.getElementsByTagName('name').item(0).childNodes[-1].nodeValue
+    arch = pkg.getElementsByTagName('arch').item(0).childNodes[-1].nodeValue
+    version = pkg.getElementsByTagName('version').item(0)
+    evr = '%s-%s' % (version.getAttribute('ver'), version.getAttribute('rel'))
+    checksum = pkg.getElementsByTagName('checksum').item(0).childNodes[-1].nodeValue
+    filename = pkg.getElementsByTagName('location').item(0).getAttribute('href').split('/')[-1]
+
+    s = '%s/%s/%s/%s/%s/%s/%s' % \
+            (satellite_root, checksum[:3], name, evr, arch, checksum, filename)
+
+    if os.path.exists(s):
+        return s
+
+    evr = '%s:%s-%s' % (version.getAttribute('epoch'), \
+            version.getAttribute('ver'), version.getAttribute('rel'))
+    return '%s/%s/%s/%s/%s/%s/%s' % \
+            (satellite_root, checksum[:3], name, evr, arch, checksum, filename)
+
+def link_distro(distro, repomd):
+    doc = None
+    distro_path = '%s/%s' % (distrotree_root, distro.keys()[-1])
+    package_path = '%s/Packages' % (distro_path)
+    primary = '%s/repodata/%s' % (distro_path, repomd['primary'])
+    (mimetype, encoding) = mimetypes.guess_type(primary)
+
+    # Prepare package directory
+    if os.path.isdir(package_path):
+        for i in os.listdir(package_path):
+            os.unlink('%s/%s' % (package_path, i))
+    else:
+        os.mkdir(package_path)
+
+    # Read primary.xml
+    # mimetype == 'text/xml' in EL6
+    # mimetype == 'application/xml' in Debian 7
+    if mimetype == 'text/xml':
+        if encoding == None:
+            doc = minidom.parse(primary)
+        elif encoding == 'gzip':
+            fh = gzip.open(primary)
+            doc = minidom.parse(fh)
+            fh.close()
+    else:
+        raise Exception('Not an xml file.')
+
+    packages = doc.documentElement.getElementsByTagName('package')
+    for i in range(packages.length):
+        package_file = get_package_file(packages.item(i))
+        symlink_file = '%s/%s' % (package_path, package_file.split('/')[-1])
+        os.symlink(package_file, symlink_file)
+        if not os.path.exists(symlink_file):
+            raise Exception('%s is an invalid symbolic link.' % (symlink_file))
+
+for i in distros:
+    # rsync all distro files from mirror with the exception of the Packages directory
+    distro_path = '%s/%s' % (distrotree_root, i)
+    subprocess.call([ '/usr/bin/rsync', '-rH', '--exclude', 'Packages', '--delete', distros[i], distro_path ])
+
+    link_distro({ i: distros[i] }, repomd('%s/%s/repodata' % (distrotree_root, i)))
